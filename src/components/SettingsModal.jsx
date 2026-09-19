@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { X, Settings, Check, Wifi, Cloud, AlertTriangle, CheckCircle2, Save, HelpCircle, ChevronDown, ChevronUp } from 'lucide-react';
 import { LANGUAGES, getTranslation } from '../i18n';
 import { getStoredSettings, saveStoredSettings } from '../storage';
-import { testGatewayConnection } from '../api';
+import { testGatewayConnection, saveSettingsApi, fetchSettingsApi } from '../api';
 
 export default function SettingsModal({
   isOpen,
@@ -23,6 +23,11 @@ export default function SettingsModal({
   useEffect(() => {
     if (isOpen) {
       setSettings(getStoredSettings());
+      fetchSettingsApi().then((apiSettings) => {
+        if (apiSettings && Object.keys(apiSettings).length > 0) {
+          setSettings((prev) => ({ ...prev, ...apiSettings }));
+        }
+      }).catch(() => {});
       setTestResult(null);
       setSavedSuccess(false);
     }
@@ -58,6 +63,7 @@ export default function SettingsModal({
   const handleSave = (e) => {
     e.preventDefault();
     saveStoredSettings(settings);
+    saveSettingsApi(settings).catch((err) => console.error('Failed to sync settings with cloud:', err));
     onChangeLang(settings.ui_lang);
     onChangeTemplateLang(settings.template_lang);
     setSavedSuccess(true);

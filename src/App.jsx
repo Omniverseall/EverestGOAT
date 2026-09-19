@@ -15,8 +15,16 @@ import {
   getStoredSettings,
   saveStoredSettings
 } from './storage';
+import {
+  fetchStudentsApi,
+  createStudentApi,
+  updateStudentApi,
+  deleteStudentApi,
+  batchImportStudentsApi,
+  fetchGroupsApi
+} from './api';
 import { getTranslation } from './i18n';
-import { UserPlus, Sparkles, AlertCircle, RefreshCw } from 'lucide-react';
+import { UserPlus, Sparkles, AlertCircle, RefreshCw, Cloud, Database } from 'lucide-react';
 
 export default function App() {
   const initialSettings = getStoredSettings();
@@ -24,9 +32,12 @@ export default function App() {
   const [templateLang, setTemplateLang] = useState(initialSettings.template_lang || 'uz_lat');
 
   const [students, setStudents] = useState([]);
+  const [allStudents, setAllStudents] = useState([]);
   const [groups, setGroups] = useState([]);
   const [selectedGroup, setSelectedGroup] = useState('all');
   const [searchTerm, setSearchTerm] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [cloudSynced, setCloudSynced] = useState(true);
 
   // Modals state
   const [studentModalOpen, setStudentModalOpen] = useState(false);
@@ -40,29 +51,74 @@ export default function App() {
 
   const t = (k) => getTranslation(uiLang, k);
 
-  // Load students & groups from Local Storage
-  const loadData = () => {
-    const list = getStoredStudents(selectedGroup, searchTerm);
-    const grps = getStoredGroups();
-    setStudents(list);
-    setGroups(grps);
+  // Load students & groups from Turso Cloud DB (with LocalStorage fallback & migration)
+  const loadData = async () => {
+    try {
+      setLoading(true);
+      let list = await fetchStudentsApi(selectedGroup, searchTerm);
+      let all = await fetchStudentsApi('all', '');
+
+      // Check if migration from localStorage is needed
+      const local = getStoredStudents('all', '');
+      if (all.length === 0 && local.length > 0) {
+        console.log('Migrating local students to Turso cloud DB...');
+        await batchImportStudentsApi(local);
+        list = await fetchStudentsApi(selectedGroup, searchTerm);
+        all = await fetchStudentsApi('all', '');
+      }
+
+      setStudents(list);
+      setAllStudents(all);
+      setCloudSynced(true);
+
+      const grps = await fetchGroupsApi();
+      setGroups(grps);
+    } catch (err) {
+      console.warn('API fetch failed, fallback to local storage:', err);
+      const list = getStoredStudents(selectedGroup, searchTerm);
+      const grps = getStoredGroups();
+      setStudents(list);
+      setAllStudents(getStoredStudents('all', ''));
+      setGroups(grps);
+      setCloudSynced(false);
+    } finally {
+      setLoading(false);
+    }
   };
 
   useEffect(() => {
     loadData();
   }, [selectedGroup, searchTerm]);
 
-  const handleSaveStudent = (data) => {
-    saveStudent(data);
+  const handleSaveStudent = async (data) => {
+    try {
+      if (data.id && (typeof data.id === 'number' || !isNaN(Number(data.id)))) {
+        await updateStudentApi(data.id, data);
+      } else {
+        await createStudentApi(data);
+      }
+    } catch (err) {
+      console.error('Failed to save to cloud API, saving locally:', err);
+      saveStudent(data);
+    }
     setStudentModalOpen(false);
     setEditingStudent(null);
-    loadData();
+    await loadData();
   };
 
-  const handleDeleteStudent = (student) => {
+  const handleDeleteStudent = async (student) => {
     if (window.confirm(t('delete_confirm') + ` (${student.name})`)) {
-      deleteStoredStudent(student.id);
-      loadData();
+      try {
+        if (student.id && (typeof student.id === 'number' || !isNaN(Number(student.id)))) {
+          await deleteStudentApi(student.id);
+        } else {
+          deleteStoredStudent(student.id);
+        }
+      } catch (err) {
+        console.error('Failed to delete from cloud API:', err);
+        deleteStoredStudent(student.id);
+      }
+      await loadData();
     }
   };
 
@@ -121,6 +177,14 @@ export default function App() {
                 <span className="text-[11px] px-2.5 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200 font-semibold">
                   {initialSettings.gateway_mode === 'cloud' ? 'SMS-Gate Cloud' : 'Wi-Fi Local'}
                 </span>
+                <span className={`text-[11px] px-2.5 py-0.5 rounded-full font-semibold border flex items-center gap-1 ${
+                  cloudSynced
+                    ? 'bg-blue-50 text-[#0154F8] border-[#0154F8]/20'
+                    : 'bg-amber-50 text-amber-700 border-amber-200'
+                }`}>
+                  <Database className="w-3 h-3" />
+                  <span>{cloudSynced ? 'Turso Cloud' : 'Offline'}</span>
+                </span>
               </div>
               <p className="text-xs text-slate-500 font-medium">
                 {t('storage_notice')}
@@ -143,7 +207,7 @@ export default function App() {
               groups={groups}
               selectedGroup={selectedGroup}
               onSelectGroup={setSelectedGroup}
-              students={getStoredStudents('all', '')}
+              students={allStudents.length > 0 ? allStudents : getStoredStudents('all', '')}
               currentLang={uiLang}
             />
           </div>

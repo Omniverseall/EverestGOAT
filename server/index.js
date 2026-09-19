@@ -14,20 +14,38 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const distPath = path.join(__dirname, '..', 'dist');
 
-// Initialize DB schema and defaults
-initDb();
-
 const app = express();
 const PORT = process.env.PORT || 3001;
 
 app.use(cors());
 app.use(express.json());
 
+// Ensure DB is initialized (works both locally and in serverless)
+let isReady = false;
+const initPromise = initDb()
+  .then(() => {
+    isReady = true;
+  })
+  .catch((err) => {
+    console.error('Failed to initialize Turso DB:', err);
+  });
+
+app.use(async (req, res, next) => {
+  if (!isReady) {
+    try {
+      await initPromise;
+    } catch (e) {
+      return res.status(500).json({ error: 'Database initialization failed: ' + e.message });
+    }
+  }
+  next();
+});
+
 // Helper to get all settings as key-value object
-function getSettingsMap() {
-  const rows = db.prepare('SELECT key, value FROM settings').all();
+async function getSettingsMap() {
+  const rs = await db.execute('SELECT key, value FROM settings');
   const map = {};
-  for (const r of rows) {
+  for (const r of rs.rows) {
     map[r.key] = r.value;
   }
   return map;
@@ -38,7 +56,7 @@ function getSettingsMap() {
 // -------------------------------------------------------------
 
 // GET /api/students?group=...&search=...
-app.get('/api/students', (req, res) => {
+app.get('/api/students', async (req, res) => {
   try {
     const { group, search } = req.query;
     let query = 'SELECT * FROM students WHERE 1=1';
@@ -56,7 +74,14 @@ app.get('/api/students', (req, res) => {
     }
 
     query += ' ORDER BY group_name ASC, name ASC';
-    const students = db.prepare(query).all(...params);
+    const rs = await db.execute({ sql: query, args: params });
+    
+    // Parse group_days if stored as string
+    const students = rs.rows.map(s => ({
+      ...s,
+      group_days: s.group_days ? s.group_days.split(',').filter(Boolean) : []
+    }));
+
     res.json(students);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -64,58 +89,124 @@ app.get('/api/students', (req, res) => {
 });
 
 // POST /api/students - Add student
-app.post('/api/students', (req, res) => {
+app.post('/api/students', async (req, res) => {
   try {
-    const { name, parent_name, parent_phone, group_name, notes } = req.body;
-    if (!name || !parent_name || !parent_phone || !group_name) {
-      return res.status(400).json({ error: 'Пожалуйста, заполните все обязательные поля: ФИО ученика, ФИО родственника, номер телефона и группу.' });
+    const { name, parent_name, parent_phone, group_name, notes, gender, group_days } = req.body;
+    if (!name || !parent_phone || !group_name) {
+      return res.status(400).json({
+        error: 'Пожалуйста, заполните обязательные поля: ФИО ученика, номер телефона и группу.'
+      });
     }
 
     const cleanPhone = normalizePhone(parent_phone);
-    const stmt = db.prepare(`
-      INSERT INTO students (name, parent_name, parent_phone, group_name, notes)
-      VALUES (?, ?, ?, ?, ?)
-    `);
-    const info = stmt.run(name.trim(), parent_name.trim(), cleanPhone, group_name.trim(), notes ? notes.trim() : '');
-    const newStudent = db.prepare('SELECT * FROM students WHERE id = ?').get(info.lastInsertRowid);
-    res.status(201).json(newStudent);
+    const daysStr = Array.isArray(group_days) ? group_days.join(',') : (group_days || '');
+
+    const rs = await db.execute({
+      sql: `INSERT INTO students (name, parent_name, parent_phone, group_name, notes, gender, group_days)
+            VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING *`,
+      args: [
+        name.trim(),
+        (parent_name || '').trim(),
+        cleanPhone,
+        group_name.trim(),
+        notes ? notes.trim() : '',
+        gender || 'male',
+        daysStr
+      ]
+    });
+
+    const s = rs.rows[0];
+    res.status(201).json({
+      ...s,
+      group_days: s.group_days ? s.group_days.split(',').filter(Boolean) : []
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/students/batch - Batch import students (for migration from localStorage)
+app.post('/api/students/batch', async (req, res) => {
+  try {
+    const { students } = req.body;
+    if (!Array.isArray(students) || students.length === 0) {
+      return res.json({ success: true, inserted: 0 });
+    }
+
+    let inserted = 0;
+    for (const s of students) {
+      if (!s.name || !s.parent_phone) continue;
+      const cleanPhone = normalizePhone(s.parent_phone);
+      const daysStr = Array.isArray(s.group_days) ? s.group_days.join(',') : (s.group_days || '');
+      await db.execute({
+        sql: `INSERT INTO students (name, parent_name, parent_phone, group_name, notes, gender, group_days)
+              VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        args: [
+          s.name.trim(),
+          (s.parent_name || '').trim(),
+          cleanPhone,
+          (s.group_name || 'Group 1').trim(),
+          (s.notes || '').trim(),
+          s.gender || 'male',
+          daysStr
+        ]
+      });
+      inserted++;
+    }
+
+    res.json({ success: true, inserted });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
 // PUT /api/students/:id - Update student
-app.put('/api/students/:id', (req, res) => {
+app.put('/api/students/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const { name, parent_name, parent_phone, group_name, notes } = req.body;
+    const { name, parent_name, parent_phone, group_name, notes, gender, group_days } = req.body;
     const cleanPhone = normalizePhone(parent_phone);
+    const daysStr = Array.isArray(group_days) ? group_days.join(',') : (group_days || '');
 
-    const stmt = db.prepare(`
-      UPDATE students
-      SET name = ?, parent_name = ?, parent_phone = ?, group_name = ?, notes = ?
-      WHERE id = ?
-    `);
-    const info = stmt.run(name.trim(), parent_name.trim(), cleanPhone, group_name.trim(), notes ? notes.trim() : '', id);
+    const rs = await db.execute({
+      sql: `UPDATE students
+            SET name = ?, parent_name = ?, parent_phone = ?, group_name = ?, notes = ?, gender = ?, group_days = ?
+            WHERE id = ? RETURNING *`,
+      args: [
+        name.trim(),
+        (parent_name || '').trim(),
+        cleanPhone,
+        group_name.trim(),
+        notes ? notes.trim() : '',
+        gender || 'male',
+        daysStr,
+        id
+      ]
+    });
 
-    if (info.changes === 0) {
+    if (rs.rows.length === 0) {
       return res.status(404).json({ error: 'Ученик не найден' });
     }
 
-    const updated = db.prepare('SELECT * FROM students WHERE id = ?').get(id);
-    res.json(updated);
+    const s = rs.rows[0];
+    res.json({
+      ...s,
+      group_days: s.group_days ? s.group_days.split(',').filter(Boolean) : []
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
 // DELETE /api/students/:id - Delete student
-app.delete('/api/students/:id', (req, res) => {
+app.delete('/api/students/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const stmt = db.prepare('DELETE FROM students WHERE id = ?');
-    const info = stmt.run(id);
-    if (info.changes === 0) {
+    const rs = await db.execute({
+      sql: 'DELETE FROM students WHERE id = ?',
+      args: [id]
+    });
+    if (rs.rowsAffected === 0) {
       return res.status(404).json({ error: 'Ученик не найден' });
     }
     res.json({ success: true });
@@ -125,10 +216,12 @@ app.delete('/api/students/:id', (req, res) => {
 });
 
 // GET /api/groups - Automatically extract distinct groups from students
-app.get('/api/groups', (req, res) => {
+app.get('/api/groups', async (req, res) => {
   try {
-    const rows = db.prepare("SELECT DISTINCT group_name FROM students WHERE group_name IS NOT NULL AND group_name != '' ORDER BY group_name ASC").all();
-    const groups = rows.map(r => r.group_name);
+    const rs = await db.execute(
+      "SELECT DISTINCT group_name FROM students WHERE group_name IS NOT NULL AND group_name != '' ORDER BY group_name ASC"
+    );
+    const groups = rs.rows.map((r) => r.group_name);
     res.json(groups);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -139,27 +232,26 @@ app.get('/api/groups', (req, res) => {
 // TEMPLATES ROUTES
 // -------------------------------------------------------------
 
-app.get('/api/templates', (req, res) => {
+app.get('/api/templates', async (req, res) => {
   try {
-    const templates = db.prepare('SELECT * FROM complaint_templates ORDER BY id ASC').all();
-    res.json(templates);
+    const rs = await db.execute('SELECT * FROM complaint_templates ORDER BY id ASC');
+    res.json(rs.rows);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-app.put('/api/templates/:id', (req, res) => {
+app.put('/api/templates/:id', async (req, res) => {
   try {
     const { id } = req.params;
     const { template, title, description } = req.body;
-    const stmt = db.prepare(`
-      UPDATE complaint_templates
-      SET template = ?, title = COALESCE(?, title), description = COALESCE(?, description)
-      WHERE id = ?
-    `);
-    stmt.run(template, title, description, id);
-    const updated = db.prepare('SELECT * FROM complaint_templates WHERE id = ?').get(id);
-    res.json(updated);
+    const rs = await db.execute({
+      sql: `UPDATE complaint_templates
+            SET template = ?, title = COALESCE(?, title), description = COALESCE(?, description)
+            WHERE id = ? RETURNING *`,
+      args: [template, title || null, description || null, id]
+    });
+    res.json(rs.rows[0]);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -169,70 +261,18 @@ app.put('/api/templates/:id', (req, res) => {
 // COMPLAINTS & MESSAGING ROUTES
 // -------------------------------------------------------------
 
-// Helper to compile template
-function compileMessage({ template, student, minutes, comment, teacherName }) {
-  const dateStr = new Date().toLocaleDateString('ru-RU');
-  return template
-    .replace(/\{ученик\}/g, student.name)
-    .replace(/\{родственник\}/g, student.parent_name)
-    .replace(/\{группа\}/g, student.group_name)
-    .replace(/\{минут\}/g, minutes || '15')
-    .replace(/\{учитель\}/g, teacherName || 'Преподаватель')
-    .replace(/\{комментарий\}/g, comment || '')
-    .replace(/\{дата\}/g, dateStr);
-}
-
-// POST /api/complaints/preview - Preview message without sending
-app.post('/api/complaints/preview', (req, res) => {
-  try {
-    const { studentId, templateId, minutes, comment, customText } = req.body;
-    const student = db.prepare('SELECT * FROM students WHERE id = ?').get(studentId);
-    if (!student) return res.status(404).json({ error: 'Ученик не найден' });
-
-    const settings = getSettingsMap();
-    let text = '';
-
-    if (customText) {
-      text = customText;
-    } else {
-      const templateRow = db.prepare('SELECT * FROM complaint_templates WHERE id = ?').get(templateId);
-      if (!templateRow) return res.status(404).json({ error: 'Шаблон не найден' });
-      text = compileMessage({
-        template: templateRow.template,
-        student,
-        minutes,
-        comment,
-        teacherName: settings.teacher_name
-      });
-    }
-
-    const whatsappUrl = generateWhatsAppUrl(student.parent_phone, text);
-    const smsUrl = generateSmsUrl(student.parent_phone, text);
-
-    res.json({
-      message: text,
-      parentPhone: student.parent_phone,
-      parentName: student.parent_name,
-      studentName: student.name,
-      whatsappUrl,
-      smsUrl
-    });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// POST /api/complaints/send - Send complaint via Android Gateway (Local or Cloud)
+// POST /api/complaints/send - Send complaint via Android Gateway & Log to DB
 app.post('/api/complaints/send', async (req, res) => {
   try {
     const {
       phone,
       message,
       studentId,
-      templateId,
-      minutes,
-      comment,
-      customText,
+      studentName,
+      parentName,
+      groupName,
+      complaintType,
+      minutesLate,
       mode,
       ip,
       port,
@@ -243,14 +283,16 @@ app.post('/api/complaints/send', async (req, res) => {
       cloudPassword
     } = req.body;
 
-    const settings = getSettingsMap();
+    const settings = await getSettingsMap();
     let finalPhone = phone;
-    let finalMessage = message || customText;
 
     if (!finalPhone && studentId) {
-      const student = db.prepare('SELECT * FROM students WHERE id = ?').get(studentId);
-      if (student) {
-        finalPhone = student.parent_phone;
+      const studentRs = await db.execute({
+        sql: 'SELECT * FROM students WHERE id = ?',
+        args: [studentId]
+      });
+      if (studentRs.rows.length > 0) {
+        finalPhone = studentRs.rows[0].parent_phone;
       }
     }
 
@@ -259,10 +301,10 @@ app.post('/api/complaints/send', async (req, res) => {
     }
 
     const cleanPhone = normalizePhone(finalPhone);
-    const smsUrl = generateSmsUrl(cleanPhone, finalMessage);
+    const smsUrl = generateSmsUrl(cleanPhone, message);
 
     const gatewayResult = await sendSmsViaGateway({
-      mode: mode || settings.gateway_mode || 'local',
+      mode: mode || settings.gateway_mode || 'cloud',
       ip: ip || settings.gateway_ip || '192.168.100.119',
       port: port || settings.gateway_port || '8080',
       login: login || settings.gateway_login || 'sms',
@@ -271,17 +313,41 @@ app.post('/api/complaints/send', async (req, res) => {
       cloudLogin: cloudLogin || settings.cloud_login || 'GTREYM',
       cloudPassword: cloudPassword || settings.cloud_password || 'qmi0tt1znyb3kh',
       phone: cleanPhone,
-      message: finalMessage
+      message
     });
 
     const status = gatewayResult.success ? 'sent' : 'failed';
-    const errorMessage = gatewayResult.success ? null : gatewayResult.error;
+    const errorMessage = gatewayResult.success ? null : (gatewayResult.error || 'Ошибка отправки');
+
+    // Save log to Turso
+    try {
+      await db.execute({
+        sql: `INSERT INTO complaint_logs (
+                student_id, student_name, parent_name, parent_phone, group_name,
+                complaint_type, message, minutes_late, status, error_message
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        args: [
+          studentId || null,
+          studentName || '',
+          parentName || '',
+          cleanPhone,
+          groupName || '',
+          complaintType || 'complaint',
+          message || '',
+          minutesLate || null,
+          status,
+          errorMessage
+        ]
+      });
+    } catch (logErr) {
+      console.error('Failed to write complaint log to DB:', logErr);
+    }
 
     res.json({
       success: gatewayResult.success,
       status,
       errorMessage,
-      message: finalMessage,
+      message,
       smsUrl,
       gatewayResult
     });
@@ -294,18 +360,18 @@ app.post('/api/complaints/send', async (req, res) => {
 // HISTORY & LOGS ROUTES
 // -------------------------------------------------------------
 
-app.get('/api/logs', (req, res) => {
+app.get('/api/logs', async (req, res) => {
   try {
-    const logs = db.prepare('SELECT * FROM complaint_logs ORDER BY created_at DESC LIMIT 100').all();
-    res.json(logs);
+    const rs = await db.execute('SELECT * FROM complaint_logs ORDER BY created_at DESC LIMIT 100');
+    res.json(rs.rows);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-app.delete('/api/logs', (req, res) => {
+app.delete('/api/logs', async (req, res) => {
   try {
-    db.prepare('DELETE FROM complaint_logs').run();
+    await db.execute('DELETE FROM complaint_logs');
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -316,31 +382,28 @@ app.delete('/api/logs', (req, res) => {
 // SETTINGS & TEST GATEWAY ROUTES
 // -------------------------------------------------------------
 
-app.get('/api/settings', (req, res) => {
+app.get('/api/settings', async (req, res) => {
   try {
-    res.json(getSettingsMap());
+    const settings = await getSettingsMap();
+    res.json(settings);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-app.post('/api/settings', (req, res) => {
+app.post('/api/settings', async (req, res) => {
   try {
     const settings = req.body;
-    const upsert = db.prepare(`
-      INSERT INTO settings (key, value)
-      VALUES (?, ?)
-      ON CONFLICT(key) DO UPDATE SET value = excluded.value
-    `);
-
-    const updateMany = db.transaction((obj) => {
-      for (const [k, v] of Object.entries(obj)) {
-        upsert.run(k, String(v));
-      }
-    });
-
-    updateMany(settings);
-    res.json(getSettingsMap());
+    for (const [k, v] of Object.entries(settings)) {
+      await db.execute({
+        sql: `INSERT INTO settings (key, value)
+              VALUES (?, ?)
+              ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+        args: [k, String(v)]
+      });
+    }
+    const updated = await getSettingsMap();
+    res.json(updated);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -349,9 +412,9 @@ app.post('/api/settings', (req, res) => {
 app.post('/api/gateway/test', async (req, res) => {
   try {
     const { mode, ip, port, login, password, cloudUrl, cloudLogin, cloudPassword } = req.body;
-    const settings = getSettingsMap();
+    const settings = await getSettingsMap();
     const result = await testGatewayConnection({
-      mode: mode || settings.gateway_mode || 'local',
+      mode: mode || settings.gateway_mode || 'cloud',
       ip: ip || settings.gateway_ip || '192.168.100.119',
       port: port || settings.gateway_port || '8080',
       login: login || settings.gateway_login || 'sms',
@@ -366,7 +429,7 @@ app.post('/api/gateway/test', async (req, res) => {
   }
 });
 
-// Serve static frontend assets
+// Serve static frontend assets when run as standalone server
 app.use(express.static(distPath));
 
 // SPA fallback for non-API routes
@@ -374,7 +437,12 @@ app.get(/^(?!\/api).*/, (req, res) => {
   res.sendFile(path.join(distPath, 'index.html'));
 });
 
-// Start Express server
-app.listen(PORT, () => {
-  console.log(`🐐 Goat Server is running on http://localhost:${PORT}`);
-});
+// Export default app for Vercel / serverless handlers
+export default app;
+
+// Start Express server if running standalone
+if (process.env.NODE_ENV !== 'production' || !process.env.VERCEL) {
+  app.listen(PORT, () => {
+    console.log(`🐐 Goat Server is running on http://localhost:${PORT}`);
+  });
+}

@@ -1,20 +1,24 @@
-import Database from 'better-sqlite3';
+import { createClient } from '@libsql/client';
+import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { DEFAULT_TEMPLATES } from './defaultTemplates.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const dbPath = path.join(__dirname, 'goat.db');
+dotenv.config({ path: path.join(__dirname, '..', '.env') });
 
-export const db = new Database(dbPath);
+const url = process.env.TURSO_DATABASE_URL || 'file:goat.db';
+const authToken = process.env.TURSO_AUTH_TOKEN;
 
-// Enable WAL mode for better concurrency and performance
-db.pragma('journal_mode = WAL');
+export const db = createClient({
+  url,
+  authToken,
+});
 
-export function initDb() {
+export async function initDb() {
   // 1. Students table
-  db.exec(`
+  await db.execute(`
     CREATE TABLE IF NOT EXISTS students (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       name TEXT NOT NULL,
@@ -22,12 +26,14 @@ export function initDb() {
       parent_phone TEXT NOT NULL,
       group_name TEXT NOT NULL,
       notes TEXT,
+      gender TEXT DEFAULT 'male',
+      group_days TEXT,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
   `);
 
   // 2. Complaint templates table
-  db.exec(`
+  await db.execute(`
     CREATE TABLE IF NOT EXISTS complaint_templates (
       id TEXT PRIMARY KEY,
       title TEXT NOT NULL,
@@ -39,7 +45,7 @@ export function initDb() {
   `);
 
   // 3. Complaint logs table
-  db.exec(`
+  await db.execute(`
     CREATE TABLE IF NOT EXISTS complaint_logs (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       student_id INTEGER,
@@ -50,7 +56,7 @@ export function initDb() {
       complaint_type TEXT NOT NULL,
       message TEXT NOT NULL,
       minutes_late INTEGER,
-      status TEXT NOT NULL, -- 'sent', 'failed', 'whatsapp'
+      status TEXT NOT NULL,
       error_message TEXT,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY(student_id) REFERENCES students(id) ON DELETE SET NULL
@@ -58,7 +64,7 @@ export function initDb() {
   `);
 
   // 4. Settings table
-  db.exec(`
+  await db.execute(`
     CREATE TABLE IF NOT EXISTS settings (
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL
@@ -66,14 +72,15 @@ export function initDb() {
   `);
 
   // Seed default templates if not present
-  const countTemplates = db.prepare('SELECT COUNT(*) as count FROM complaint_templates').get();
-  if (countTemplates.count === 0) {
-    const insertTemplate = db.prepare(`
-      INSERT INTO complaint_templates (id, title, description, template, has_minutes, icon)
-      VALUES (@id, @title, @description, @template, @has_minutes, @icon)
-    `);
+  const countTemplatesRes = await db.execute('SELECT COUNT(*) as count FROM complaint_templates');
+  const countTemplates = countTemplatesRes.rows[0]?.count || 0;
+  if (Number(countTemplates) === 0) {
     for (const t of DEFAULT_TEMPLATES) {
-      insertTemplate.run(t);
+      await db.execute({
+        sql: `INSERT OR IGNORE INTO complaint_templates (id, title, description, template, has_minutes, icon)
+              VALUES (?, ?, ?, ?, ?, ?)`,
+        args: [t.id, t.title, t.description || '', t.template, t.has_minutes ? 1 : 0, t.icon || 'MessageSquare']
+      });
     }
   }
 
@@ -83,7 +90,7 @@ export function initDb() {
     { key: 'gateway_port', value: '8080' },
     { key: 'gateway_login', value: 'sms' },
     { key: 'gateway_password', value: '12345678' },
-    { key: 'gateway_mode', value: 'local' }, // 'local' | 'cloud'
+    { key: 'gateway_mode', value: 'cloud' },
     { key: 'cloud_url', value: 'https://api.sms-gate.app/3rdparty/v1/message' },
     { key: 'cloud_login', value: 'GTREYM' },
     { key: 'cloud_password', value: 'qmi0tt1znyb3kh' },
@@ -91,13 +98,10 @@ export function initDb() {
     { key: 'country_code', value: '+998' }
   ];
 
-  const getSetting = db.prepare('SELECT value FROM settings WHERE key = ?');
-  const insertSetting = db.prepare('INSERT INTO settings (key, value) VALUES (?, ?)');
-
   for (const s of defaultSettings) {
-    if (!getSetting.get(s.key)) {
-      insertSetting.run(s.key, s.value);
-    }
+    await db.execute({
+      sql: `INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)`,
+      args: [s.key, s.value]
+    });
   }
 }
-

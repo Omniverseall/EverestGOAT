@@ -110,7 +110,13 @@ export default function ComplaintModal({
         cloudLogin: settings.cloud_login || 'GTREYM',
         cloudPassword: settings.cloud_password || 'qmi0tt1znyb3kh',
         phone: student.parent_phone,
-        message: editedText
+        message: editedText,
+        studentId: student.id,
+        studentName: student.name,
+        parentName: student.parent_name,
+        groupName: student.group_name,
+        complaintType: complaintTitle,
+        minutesLate: selectedType === 'late' ? Number(minutes) : null
       });
 
       setSendResult({
