@@ -305,13 +305,13 @@ app.post('/api/complaints/send', async (req, res) => {
 
     const gatewayResult = await sendSmsViaGateway({
       mode: mode || settings.gateway_mode || 'cloud',
-      ip: ip || settings.gateway_ip || '192.168.100.119',
+      ip: ip || settings.gateway_ip || '192.168.68.110',
       port: port || settings.gateway_port || '8080',
       login: login || settings.gateway_login || 'sms',
-      password: password || settings.gateway_password || '12345678',
-      cloudUrl: cloudUrl || settings.cloud_url,
-      cloudLogin: cloudLogin || settings.cloud_login || 'GTREYM',
-      cloudPassword: cloudPassword || settings.cloud_password || 'qmi0tt1znyb3kh',
+      password: password || settings.gateway_password || 'rare..ali121',
+      cloudUrl: cloudUrl || settings.cloud_url || 'https://api.sms-gate.app/3rdparty/v1/message',
+      cloudLogin: cloudLogin || settings.cloud_login || 'FFKANJ',
+      cloudPassword: cloudPassword || settings.cloud_password || 'd0vgkjqdy_ddcm',
       phone: cleanPhone,
       message
     });
@@ -415,13 +415,13 @@ app.post('/api/gateway/test', async (req, res) => {
     const settings = await getSettingsMap();
     const result = await testGatewayConnection({
       mode: mode || settings.gateway_mode || 'cloud',
-      ip: ip || settings.gateway_ip || '192.168.100.119',
+      ip: ip || settings.gateway_ip || '192.168.68.110',
       port: port || settings.gateway_port || '8080',
       login: login || settings.gateway_login || 'sms',
-      password: password || settings.gateway_password || '12345678',
-      cloudUrl: cloudUrl || settings.cloud_url,
-      cloudLogin: cloudLogin || settings.cloud_login || 'GTREYM',
-      cloudPassword: cloudPassword || settings.cloud_password || 'qmi0tt1znyb3kh'
+      password: password || settings.gateway_password || 'rare..ali121',
+      cloudUrl: cloudUrl || settings.cloud_url || 'https://api.sms-gate.app/3rdparty/v1/message',
+      cloudLogin: cloudLogin || settings.cloud_login || 'FFKANJ',
+      cloudPassword: cloudPassword || settings.cloud_password || 'd0vgkjqdy_ddcm'
     });
     res.json(result);
   } catch (err) {

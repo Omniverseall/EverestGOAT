@@ -157,13 +157,13 @@ export function getStoredSettings() {
 
   const defaultSettings = {
     gateway_mode: 'cloud', // Default to 'cloud' since cloud connects reliably!
-    gateway_ip: '192.168.100.119',
+    gateway_ip: '192.168.68.110',
     gateway_port: '8080',
     gateway_login: 'sms',
-    gateway_password: '12345678',
+    gateway_password: 'rare..ali121',
     cloud_url: 'https://api.sms-gate.app/3rdparty/v1/message',
-    cloud_login: 'GTREYM',
-    cloud_password: 'qmi0tt1znyb3kh',
+    cloud_login: 'FFKANJ',
+    cloud_password: 'd0vgkjqdy_ddcm',
     teacher_name: exactEverestSignature,
     country_code: '+998',
     ui_lang: 'uz_lat',

@@ -86,14 +86,14 @@ export async function initDb() {
 
   // Seed default settings matching teacher phone
   const defaultSettings = [
-    { key: 'gateway_ip', value: '192.168.100.119' },
+    { key: 'gateway_ip', value: '192.168.68.110' },
     { key: 'gateway_port', value: '8080' },
     { key: 'gateway_login', value: 'sms' },
-    { key: 'gateway_password', value: '12345678' },
+    { key: 'gateway_password', value: 'rare..ali121' },
     { key: 'gateway_mode', value: 'cloud' },
     { key: 'cloud_url', value: 'https://api.sms-gate.app/3rdparty/v1/message' },
-    { key: 'cloud_login', value: 'GTREYM' },
-    { key: 'cloud_password', value: 'qmi0tt1znyb3kh' },
+    { key: 'cloud_login', value: 'FFKANJ' },
+    { key: 'cloud_password', value: 'd0vgkjqdy_ddcm' },
     { key: 'teacher_name', value: "O'qituvchi / Учитель" },
     { key: 'country_code', value: '+998' }
   ];
